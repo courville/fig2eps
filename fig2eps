@@ -1,0 +1,255 @@
+#!/bin/sh
+
+# genfig/fig2eps (C) Marc de Courville 20/8/1994
+#            Laurent Mazet 26/1/1999
+#            Cyril Humbert 14/9/1999
+#            Laurent Mazet 5/10/1999
+#            Marc de Courville and Laurent Mazet 16/11//2000
+#            Laurent Mazet 22/11/2001
+#            Marc de Courville 12/2/2003, 17/05/2006
+
+VERSION=1.7
+
+help=no
+list="";
+level=1000;
+resource=""
+showversion=no
+incstdres=yes
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h)
+      help="yes"
+      ;;
+    -m)
+      shift
+      level="$1"
+      ;;
+    -m*)
+      level=$(echo $1 | sed -e 's/^-m//')
+      ;;
+    -r)
+      shift
+      resource="$resource $1"
+      ;;
+    -r*)
+      resource="$resource $(echo $1 | sed -e 's/^-r//')"
+      ;;
+    -v)
+      echo "$(basename $0) version $VERSION" >&2; exit 1;
+      ;;
+    -x)
+      incstdres=no
+      ;;
+    *)
+      list="$list $1"
+  esac
+  shift
+done
+
+# Verification des parametres
+
+level=$(echo $level | sed -e 's/[^0-9]*\([0-9]*\).*/0\1/')
+[ $level -eq 0 ] &&
+  { echo "$level is an incorrect magnification level." >&2; exit 1; }
+
+checked_res=""
+[ -n "$resource" ] &&
+  for file_res in $resource; do
+    [ ! -f $file_res ] &&
+      { echo "Resource file $file_res not found." >&2; exit 1; }
+    [ -z "$(echo $file_res | grep '^[~/]')" ] &&
+      file_res="$(pwd)/$file_res"
+    checked_res="$file_res $checked_res"
+  done
+resource=$checked_res
+CMD=`basename $0`
+
+[ \( "$incstdres" = "yes" \) -a  \( -f $HOME/.$(basename $0)rc \) ] &&
+  resource="$HOME/.$(basename $0)rc $resource"
+
+[ \( -z "$list" \) -o  \( "$help" = yes \) ] &&
+  { echo "
+ Usage: $CMD [-h] [-m level] [-r resource]  <file[.fig]>...
+
+-h            display help (this page)
+-m level      set magnification level. A value of 1000 corresponds to
+              100% and the scale is linear. Default value is [1000]. 
+-r resource   specifies the name of a resource file which contains TeX macros.
+	      TeX macro must be one line to allow multiple resource files.
+              By default, it tries to open ~/.${CMD}rc
+-v            show version.
+-x            exclude standard resource file.
+
+
+<file1> <file2>... figure's name
+
+  The $CMD script generates the encapsulated postcript file <filename>.eps 
+  to be included as a figure in any document based on the <filename>.fig 
+  xfig figure file (e.g. for latex with graphics.cls).
+
+  This script allows to generate an encapsulated postscript figure created 
+  by xfig containing text and equations to be processed by latex. 
+  Fonts are scaled properly.  The fonts to be used in xfig are the latex 
+  fonts. In that purpose it is thus convenient to use the following command
+  to launch xfig:
+
+    xfig -Portrait -specialtext -latexfonts -startlatexFont default
+
+" >&2; exit 1; }
+
+# Le répertoire où on écrit les fichiers temporaires.
+# On recherche un nom de répertoire dans la variable d'environnement TMP,
+# si elle n'est pas définie, on regarde dans TEMP, si cette dernière
+# n'existe pas non plus, on utilise /tmp .
+TMP=${TMP:=$TEMP}
+TMP=${TMP:=/tmp}
+[ \( -d $TMP \) -a \( -w $TMP \) ] ||
+  { echo "$TMP must be a writable directory" >&2; exit 1; }
+
+# Les fichiers temporaires (chemin d'accès relatif à $TMP).
+prefixe=$(basename $0)-$$
+dvi_file=$prefixe.dvi
+eps_file=$prefixe.eps
+latex_file=$prefixe.tex
+pstex_file=$prefixe.pstex
+pstex_t_file=$prefixe.pstex_t
+trap "rm -f $TMP/$prefixe*; cd $OLDPWD; exit 1;" 0 1 2 15
+
+# Version de dvips
+if [ $(dvips -v | cut -d" " -f4 | tr '.[:alpha:]' ' ' | sed -e "s, ,,g") -gt 570 ]; then
+   dvi_v="cool"
+else
+   dvi_v="ugly"
+fi
+
+# Pour chaque fichier passé en argument...
+for fig_file in $list; do
+
+  name=$(basename "$fig_file" .fig)	# sans extension ni chemin d'accès
+  dir=$(dirname "$fig_file")
+  fig_file=$name.fig
+
+  # Si le fichier n'existe pas ou s'il n'est pas au format FIG,
+  # on passe au suivant.
+  [ ! -f $dir/$fig_file ] && 
+    { echo "Skipping \"$fig_file\" (file not found)..." >&2; continue; }
+
+  head -1 "$dir/$fig_file" | grep -q "#FIG" ||
+    { echo "Skipping \"$fig_file\" (not a FIG file)..." >&2; continue; }
+
+  # Fabrique les fichiers pstex et pstex_t à l'aide de fig2dev
+  echo -n "Processing \"$fig_file\": "
+
+  if [ "$dvi_v" = "cool" ]; then
+     fig2dev -L pstex -n "$name" "$dir/$fig_file" $TMP/$pstex_file &&
+     fig2dev -L pstex_t -p $pstex_file "$dir/$fig_file" $TMP/$pstex_t_file ||
+     { echo "Error while creating pstex and/or pstex_t files" >&2; continue; }
+  else
+     fig2dev -L pstex -n "$name" "$dir/$fig_file" $TMP/$pstex_file &&
+     fig2dev -L pstex_t "$dir/$fig_file" $TMP/$pstex_t_file ||
+     { echo "Error while creating pstex and/or pstex_t files" >&2; continue; }
+  fi
+
+  cd $TMP
+
+  # Crée un petit fichier LaTeX qui inclue l'image
+  cat >$latex_file <<EOF
+\documentclass{article}
+  
+\usepackage{pslatex}
+\usepackage{times}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amstext}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage[mathscr]{eucal}
+\usepackage{bbm}
+\usepackage[dvips]{color}
+\usepackage[dvips]{epsfig}
+EOF
+
+  # Ajout de macro standards
+  [ -n "$resource" ] &&
+    { ( for fil_res in $resource; do
+          cat $fil_res;
+        done ) >> $latex_file; }
+
+#        done ) | sort | uniq >> $latex_file; }
+  
+  # Fin du fichier LaTeX
+
+  if [ "$dvi_v" = "cool" ]; then
+    cat >>$latex_file <<EOF
+\setlength{\textheight}{100cm}
+\setlength{\textwidth}{100cm}
+\setlength{\oddsidemargin}{-0pt}
+\setlength{\evensidemargin}{-0pt}
+\setlength{\topmargin}{-0pt}
+\setlength{\parindent}{0pt}
+\pagestyle{empty}
+
+\begin{document}
+\begin{center}
+\input{$pstex_t_file}
+\end{center}
+\end{document}
+EOF
+  else
+    cat >>$latex_file <<EOF
+\setlength{\textheight}{100cm}
+\setlength{\textwidth}{100cm}
+\setlength{\oddsidemargin}{-0pt}
+\setlength{\evensidemargin}{-0pt}
+\setlength{\topmargin}{-0pt}
+\setlength{\parindent}{0pt}
+
+\pagestyle{empty}
+
+\begin{document}
+\makebox[0pt][l]{\color[rgb]{1,1,1}.}\par
+\mbox{\begin{picture}(0,0)
+\epsfig{file=$pstex_file}
+\end{picture}
+\input{$pstex_t_file}}
+\hspace{-10pt}\makebox[0pt][l]{\color[rgb]{1,1,1}.}
+\end{document}
+EOF
+  fi
+ #
+ ### Ne rien changer dans la ligne `EOF' (indentation, espaces...)
+
+  echo -n "LaTeX, "
+  latex 2>&1 "\nonstopmode\input{$latex_file}" 1>/dev/null 2>&1 ||
+    { cat $prefixe.log >&2; continue; }
+
+  echo -n "dvips "
+  dvips -Pwww -q -x $level -E $dvi_file -o $eps_file 1>/dev/null 2>&1
+  
+  # retaille l'image eps et recale l'image au bord de la page
+  
+  bbox=$(grep '^%%BoundingBox:' $eps_file | head -1 |
+         awk '{printf "0 0 %d %d", $4-$2, $5-$3;}')
+  epsffit $bbox $eps_file $eps_file.tmp
+  mv $eps_file.tmp $eps_file
+
+  # recopie le fichier eps dans le répertoire courant
+  # après avoir changé le titre de la figure (%%Title).
+  if [ -s $eps_file ]; then
+    cd $OLDPWD
+    cat $TMP/$eps_file |
+    sed 's/^\(%%Title: \).*/\1'"$name"'/1' > "$name".eps
+   
+    # $name ne doit pas contenir le caractère `/' !
+
+    echo "-> \"$name.eps\""
+  fi
+
+  # un peu de ménage avant de passer au fichier suivant
+  rm -f $TMP/$prefixe* 2>/dev/null
+
+done
+
+# Fin de fig2eps
